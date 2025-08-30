@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  worker:
+    build: .
+    image: ai-worker:dev
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - BASE_MODEL=SG161222/RealVisXL_V3.0_Turbo
+      - HF_HOME=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+    volumes:
+      - ./cache:/root/.cache/huggingface
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+

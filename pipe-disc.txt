@@ -1,0 +1,59 @@
+Вот финальный стек (v2.1) — коротко и по делу.
+
+1) Компоненты (с версиями и ролями)
+ • База: RealVis XL v3 Turbo (SDXL) — OpenRAIL++
+«Живая» кожа/свет, совместим с SDXL-экосистемой.
+ • ID: InstantID v3 (Apache-2.0) + ArcFace Buffalo-m (Apache-2.0)
+Привязка лица и метрика отбора (cosine).
+ • Ускорение: LCM-LoRA (SDXL) — 4 шага по умолчанию (A/B: 2 шага + CFG↓).
+ • Позинг (опц.): ControlNet-OpenPose (SDXL) — лениво подгружается.
+ • Refine: Style-Aligned Refiner (SAR) — ~10 шагов только по top-k кадрам.
+ • Апскейл: Real-ESRGAN x4 (BSD), network_strength=0.35 + лёгкий unsharp.
+ • QC: ArcFace cos + SSIM (τ=0.75) + blur-детектор (Tenengrad).
+ • Авто-фикс: Mediapipe FaceMesh/Hands → LCM-inpaint точечно.
+ • Оптимизация: ONNX/TensorRT FP16 для UNet (+15% скорость), NVMe-кеш весов.
+ • Фильтр запросов: Regex + ToxiGen (для OpenRAIL-политик).
+
+2) Пайплайн (1024², batch=4)
+ 1. Upload 1–3 селфи → crop/align
+ 2. InstantID v3.encode (эмбеддинг + kps)
+ 3. RealVis v3T + LCM-4 → черновик (~2.2 с/кадр, батч×4)
+ 4. QC (ArcFace+SSIM+blur) → shortlist ≤15
+ 5. SAR (~10 шагов) по top-10 из shortlist
+ 6. Real-ESRGAN x4 → 4096² + unsharp
+ 7. Метаданные (seed, prompt, scores) → S3/WebP/JPEG 95
+
+3) Дефолтные параметры
+ • CFG 6.5 (LCM-4) · Eta 0 · Scheduler LCM
+ • InstantID scale 0.9–1.1 (A/B для ID-hold)
+ • Pose strength 0.4–0.5 (если включён)
+ • SAR 10 шагов · Real-ESRGAN 0.35 · Unsharp (r≈2, amount≈120%)
+
+4) Производительность и себестоимость (RTX 4090 Community)
+ • Генерация 100 img: ~240 с
+ • ESRGAN 100: ~100 с
+ • SAR top-10: ~40–50 с
+ • Итого: ~380–390 с (≈ 6.5 мин) = 0.105–0.11 ч
+ • При $0.48/ч → ~$0.05 / 100 кадров (целевая себестоимость).
+(На 4090 PRO $0.77/ч → ~$0.08/100; на A100-Spot выгодно при >10k img/сут.)
+
+5) Инфра/DevOps (минимум кода)
+ • Сервис-слои: Spring (REST/Stripe) → Redis/Rabbit → FastAPI Python-воркеры.
+ • Хранение: S3-совместимое + CDN.
+ • Мониторинг: Prometheus (util/VRAM), Loki (prompts), алерт при VRAM>80%.
+ • Холодный старт: веса в init-container на локальном NVMe (pull < 5–10 с).
+ • Автоскейл: k8s HPA по длине очереди.
+
+6) Миграция вперёд (флагами)
+ • База: REALVIS_V3T → SD_3_5_MEDIUM (как выйдет) — +0.02–0.03 к ID, ~+15% времени/VRAM.
+ • LCM-2 шага (+ CFG↓ на 0.5) — если качество ок, получаешь ещё −30% времени.
+ • Refiner: SAR уже стоит; SD3.5-Refiner можно просто подменить весами.
+
+7) Ожидаемые метрики качества
+ • CLIP-ID: 0.84–0.86 база; 0.86–0.87 на top-k + SAR.
+ • Дефекты рук/глаз: ≤2–3% после авто-фикса.
+ • Визуальный «пластик»: низкий (SAR + unsharp + корректный CFG).
+
+⸻
+
+Итого: стек остаётся простым (SD-семейство + LCM + InstantID + опц. ControlNet + SAR + ESRGAN), держит ID ≥ 0.85 и ~$0.05/100 кадров на 4090 Community, готов к быстрой подмене базы на SD 3.5 Medium без переписывания кода.
