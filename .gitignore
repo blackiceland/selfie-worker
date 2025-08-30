@@ -1,0 +1,17 @@
+.idea/
+.vscode/
+.venv/
+__pycache__/
+*.iml
+
+ai-worker/cache/
+ai-worker/data/out/
+ai-worker/data/input/*
+!ai-worker/data/input/.gitkeep
+
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+
