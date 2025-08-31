@@ -6,6 +6,11 @@ import torch
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import Response, JSONResponse
 from diffusers import StableDiffusionXLPipeline
+import numpy as np
+from PIL import Image
+
+_arcface_model = None
+_ip_adapter_loaded = False
 
 
 class ModelHolder:
@@ -54,6 +59,30 @@ def _ensure_loader_started() -> None:
         thread.start()
 
 
+def _lazy_load_arcface() -> None:
+    global _arcface_model
+    if _arcface_model is not None:
+        return
+    import insightface
+    _arcface_model = insightface.app.FaceAnalysis(name="buffalo_m")
+    _arcface_model.prepare(ctx_id=0 if torch.cuda.is_available() else -1)
+
+
+def _compute_arcface_embedding(image_bytes: bytes) -> Optional[np.ndarray]:
+    try:
+        import cv2
+        array = np.frombuffer(image_bytes, dtype=np.uint8)
+        img = cv2.imdecode(array, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        faces = _arcface_model.get(img)
+        if not faces:
+            return None
+        return faces[0].normed_embedding
+    except Exception:
+        return None
+
+
 @app.get("/health")
 def health() -> JSONResponse:
     _ensure_loader_started()
@@ -67,6 +96,8 @@ def health() -> JSONResponse:
 @app.post("/generate")
 def generate(
     image: Optional[UploadFile] = File(default=None),
+    id_ref: Optional[UploadFile] = File(default=None),
+    id_scale: float = Form(default=1.0),
     prompt: str = Form(default="highly realistic studio headshot, cinematic, sharp focus"),
     negative_prompt: str = Form(default="plastic skin, deformed hands, extra fingers, blurry, watermark, text"),
     width: int = Form(default=1024),
@@ -78,6 +109,11 @@ def generate(
     _ensure_loader_started()
     if _holder is None:
         return JSONResponse({"error": "model_not_ready"}, status_code=503)
+    id_embedding: Optional[np.ndarray] = None
+    if id_ref is not None:
+        _lazy_load_arcface()
+        id_bytes = id_ref.file.read()
+        id_embedding = _compute_arcface_embedding(id_bytes)
     generator: Optional[torch.Generator] = None
     if seed is not None:
         generator = torch.Generator(device=_holder.device).manual_seed(int(seed))

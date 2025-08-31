@@ -3,12 +3,13 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_ONLY_BINARY=:all: \
     HF_HOME=/root/.cache/huggingface
 
 RUN apt-get update && apt-get install -y \
     python3.10 python3-pip git wget libgl1 libglib2.0-0 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 && \
-    pip install --upgrade pip
+    pip install --upgrade pip wheel setuptools
 
 WORKDIR /app
 COPY requirements.txt /app/
