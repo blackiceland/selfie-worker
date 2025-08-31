@@ -11,6 +11,6 @@ fastapi==0.111.0
 uvicorn[standard]==0.29.0
 huggingface_hub==0.23.4
 opencv-python-headless==4.9.0.80
-insightface==0.7.3
 onnxruntime-gpu==1.17.1
+git+https://github.com/deepinsight/insightface.git@master#subdirectory=python-package
 

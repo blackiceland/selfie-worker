@@ -7,13 +7,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/root/.cache/huggingface
 
 RUN apt-get update && apt-get install -y \
-    python3.10 python3-pip git wget libgl1 libglib2.0-0 && \
+    python3.10 python3-pip git wget libgl1 libglib2.0-0 build-essential cmake && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 && \
     pip install --upgrade pip wheel setuptools
 
 WORKDIR /app
 COPY requirements.txt /app/
-RUN pip install -r requirements.txt
+RUN PIP_NO_BINARY=insightface pip install -r requirements.txt
 
 COPY pipeline.py /app/
 
