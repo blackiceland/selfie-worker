@@ -1,0 +1,8 @@
+docker rm -f aiw
+
+docker run --rm -d --name aiw --gpus all -p 8000:8000 `
+  -v "$PWD/cache:/root/.cache/huggingface" `
+  -v "$PWD/data:/app/data" `
+  ai-worker:dev
+
+ curl http://localhost:8000/health
