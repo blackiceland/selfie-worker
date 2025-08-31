@@ -6,7 +6,8 @@ from typing import Any, Optional, Dict
 import torch
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import Response, JSONResponse
-from diffusers import StableDiffusionXLPipeline
+from diffusers import StableDiffusionXLPipeline, LCMScheduler
+from diffusers.loaders import AttnProcsLayers
 import numpy as np
 
 DEFAULT_BASE_MODEL = "SG161222/RealVisXL_V3.0_Turbo"
@@ -19,6 +20,9 @@ DEFAULT_NEGATIVE = "plastic skin, deformed hands, extra fingers, blurry, waterma
 IP_ADAPTER_REPO = "h94/IP-Adapter-FaceID-Plus"
 IP_ADAPTER_SUBFOLDER = "sdxl_models"
 IP_ADAPTER_WEIGHT = os.getenv("IP_ADAPTER_WEIGHT", "ip-adapter-faceid-plus_sdxl.bin")
+LCM_LORA_ID = os.getenv("LCM_LORA_ID", "latent-consistency/lcm-lora-sdxl")
+DEFAULT_LCM_STEPS = 4
+DEFAULT_LCM_GUIDANCE = 6.5
 
 
 class DeviceResolver:
@@ -54,9 +58,10 @@ class AppState:
     load_error: Optional[str]
     arcface_model: Optional[Any]
     ip_adapter_loaded: bool
+    lcm_loaded: bool
 
 app: FastAPI = FastAPI()
-_state = AppState(holder=None, loading=False, load_error=None, arcface_model=None, ip_adapter_loaded=False)
+_state = AppState(holder=None, loading=False, load_error=None, arcface_model=None, ip_adapter_loaded=False, lcm_loaded=False)
 
 def _load_model_async() -> None:
     try:
@@ -108,6 +113,18 @@ def _ensure_ip_adapter_loaded() -> None:
     except Exception:
         _state.ip_adapter_loaded = False
 
+
+def _ensure_lcm_loaded() -> None:
+    if _state.holder is None or _state.lcm_loaded:
+        return
+    try:
+        layers = AttnProcsLayers.from_pretrained(LCM_LORA_ID)
+        _state.holder.pipeline.load_lora_weights(layers)
+        _state.holder.pipeline.scheduler = LCMScheduler.from_config(_state.holder.pipeline.scheduler.config)
+        _state.lcm_loaded = True
+    except Exception:
+        _state.lcm_loaded = False
+
 @app.get("/health")
 def health() -> JSONResponse:
     _ensure_loader_started()
@@ -128,6 +145,8 @@ def generate(
     height: int = Form(default=DEFAULT_HEIGHT),
     steps: int = Form(default=DEFAULT_STEPS),
     guidance_scale: float = Form(default=DEFAULT_GUIDANCE),
+    use_lcm: bool = Form(default=False),
+    batch: int = Form(default=1),
     seed: Optional[int] = Form(default=None),
 ) -> Response:
     _ensure_loader_started()
@@ -144,6 +163,8 @@ def generate(
     if seed is not None:
         generator = torch.Generator(device=_state.holder.device).manual_seed(int(seed))
     with _state.holder.lock, torch.inference_mode():
+        if use_lcm:
+            _ensure_lcm_loaded()
         ip_kwargs: Dict[str, Any] = {}
         if id_embedding is not None and _state.ip_adapter_loaded:
             emb_t = torch.tensor(id_embedding, dtype=torch.float32, device=_state.holder.device)
@@ -152,14 +173,17 @@ def generate(
                 "ip_adapter_image_embeds": [emb_t, emb_t],
                 "ip_adapter_scale": [float(id_scale), float(id_scale)],
             }
+        effective_steps = int(steps if not use_lcm else DEFAULT_LCM_STEPS)
+        effective_guidance = float(guidance_scale if not use_lcm else DEFAULT_LCM_GUIDANCE)
         result_images = _state.holder.pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt,
-            num_inference_steps=int(steps),
-            guidance_scale=float(guidance_scale),
+            num_inference_steps=effective_steps,
+            guidance_scale=effective_guidance,
             height=int(height),
             width=int(width),
             generator=generator,
+            num_images_per_prompt=int(batch),
             **ip_kwargs,
         ).images
     buffer: io.BytesIO = io.BytesIO()
