@@ -5,4 +5,8 @@ docker run --rm -d --name aiw --gpus all -p 8000:8000 `
   -v "$PWD/data:/app/data" `
   ai-worker:dev
 
- curl http://localhost:8000/health
+curl http://localhost:8000/health
+
+cd C:\Users\black\IdeaProjects\worker\ai-worker
+
+docker logs -f aiw
