@@ -19,9 +19,9 @@ DEFAULT_STEPS = 30
 DEFAULT_GUIDANCE = 7.0
 DEFAULT_PROMPT = "highly realistic studio headshot, cinematic, sharp focus"
 DEFAULT_NEGATIVE = "plastic skin, deformed hands, extra fingers, blurry, watermark, text"
-IP_ADAPTER_REPO = "h94/IP-Adapter-FaceID-Plus"
+IP_ADAPTER_REPO = os.getenv("IP_ADAPTER_REPO", "h94/IP-Adapter-FaceID")
 IP_ADAPTER_SUBFOLDER = "sdxl_models"
-IP_ADAPTER_WEIGHT = os.getenv("IP_ADAPTER_WEIGHT", "ip-adapter-faceid-plus_sdxl.bin")
+IP_ADAPTER_WEIGHT = os.getenv("IP_ADAPTER_WEIGHT", "ip-adapter-faceid-plusv2_sdxl.bin")
 IP_ADAPTER_LORA_WEIGHT = os.getenv("IP_ADAPTER_LORA_WEIGHT")
 LCM_LORA_ID = os.getenv("LCM_LORA_ID", "latent-consistency/lcm-lora-sdxl")
 DEFAULT_LCM_STEPS = 4
@@ -99,8 +99,17 @@ def _lazy_load_arcface() -> None:
         return
     import insightface
     model_name = os.getenv("ARCFACE_MODEL", "buffalo_l")
-    model = insightface.app.FaceAnalysis(name=model_name)
-    model.prepare(ctx_id=0 if torch.cuda.is_available() else -1)
+    ctx_env = os.getenv("ARCFACE_CTX")
+    if ctx_env is not None and len(ctx_env) > 0:
+        try:
+            ctx_id = int(ctx_env)
+        except ValueError:
+            ctx_id = 0 if torch.cuda.is_available() else -1
+    else:
+        ctx_id = 0 if torch.cuda.is_available() else -1
+    providers = ["CPUExecutionProvider"] if ctx_id == -1 else ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    model = insightface.app.FaceAnalysis(name=model_name, providers=providers)
+    model.prepare(ctx_id=ctx_id, det_size=(640, 640))
     _state.arcface_model = model
 
 def _compute_arcface_embedding(image_bytes: bytes) -> Optional[np.ndarray]:
@@ -121,23 +130,28 @@ def _ensure_ip_adapter_loaded() -> None:
     if _state.holder is None or _state.ip_adapter_loaded:
         return
     try:
+
         _state.holder.pipeline.load_ip_adapter(
-            IP_ADAPTER_REPO,
-            subfolder=IP_ADAPTER_SUBFOLDER,
-            weight_name=IP_ADAPTER_WEIGHT,
+            "h94/IP-Adapter-FaceID",
+            subfolder="sdxl_models",
+            weight_name="ip-adapter-faceid-plus_sdxl.bin",
         )
+        _log("ip_adapter_loaded", {"repo": "h94/IP-Adapter-FaceID", "weight": "ip-adapter-faceid-plus_sdxl.bin"})
+
         if IP_ADAPTER_LORA_WEIGHT is not None and len(IP_ADAPTER_LORA_WEIGHT) > 0:
             try:
                 _state.holder.pipeline.load_lora_weights(
-                    IP_ADAPTER_REPO,
+                    "h94/IP-Adapter-FaceID",
                     weight_name=IP_ADAPTER_LORA_WEIGHT,
                 )
                 _log("ip_adapter_lora_loaded", {"weight": IP_ADAPTER_LORA_WEIGHT})
             except Exception as ex:
                 _log("ip_adapter_lora_load_failed", {"error": str(ex)})
+        
         _state.ip_adapter_loaded = True
-    except Exception:
+    except Exception as ex:
         _state.ip_adapter_loaded = False
+        _log("ip_adapter_load_failed", {"error": str(ex)})
 
 
 def _ensure_lcm_loaded() -> None:
@@ -192,12 +206,17 @@ def generate(
     if _state.holder is None:
         return JSONResponse({"error": "model_not_ready"}, status_code=503)
     id_embedding: Optional[np.ndarray] = None
+    face_image_for_adapter: Optional[Any] = None
     if id_ref is not None:
         _lazy_load_arcface()
         id_bytes = id_ref.file.read()
+        _log("id_ref_received", {"bytes": len(id_bytes) if isinstance(id_bytes, (bytes, bytearray)) else 0})
         id_embedding = _compute_arcface_embedding(id_bytes)
         if id_embedding is not None:
             _ensure_ip_adapter_loaded()
+            if not _state.ip_adapter_loaded:
+                _log("id_ref_processed", {"embedding": True, "ip_adapter_failed": True})
+                return JSONResponse({"error": "ip_adapter_load_failed"}, status_code=503)
             _log("id_ref_processed", {"embedding": True})
             try:
                 import cv2
@@ -205,31 +224,23 @@ def generate(
                 array = np.frombuffer(id_bytes, dtype=np.uint8)
                 img_bgr = cv2.imdecode(array, cv2.IMREAD_COLOR)
                 faces = _state.arcface_model.get(img_bgr) if _state.arcface_model is not None else []
+                _log("face_detected", {"count": len(faces) if isinstance(faces, list) else 0})
                 if faces:
                     face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
                     crop_bgr = face_align.norm_crop(img_bgr, landmark=face.kps, image_size=224)
                     crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
                     from PIL import Image
                     face_pil = Image.fromarray(crop_rgb)
-                    if _state.holder is not None:
-                        embeds = _state.holder.pipeline.prepare_ip_adapter_image_embeds(
-                            ip_adapter_image=[face_pil],
-                            device=_state.holder.device,
-                            do_classifier_free_guidance=True,
-                            num_images_per_prompt=int(batch),
-                        )
-                        clip_embeds = embeds[0] if isinstance(embeds, (list, tuple)) else embeds
-                        proj = _state.holder.pipeline.unet.encoder_hid_proj.image_projection_layers[0]
-                        proj.clip_embeds = clip_embeds.to(dtype=torch.float16 if _state.holder.device == "cuda" else torch.float32)
-                        if hasattr(proj, "shortcut"):
-                            setattr(proj, "shortcut", True)
-                        _log("face_clip_embeds_set", {"shape": list(proj.clip_embeds.shape) if hasattr(proj.clip_embeds, 'shape') else []})
+                    face_image_for_adapter = face_pil
+                    _log("face_clip_embeds_set", {"shape": [224, 224, 3]})
                 else:
                     _log("face_align_skipped", {"reason": "no_face"})
             except Exception as ex:
                 _log("face_clip_embed_error", {"error": str(ex)})
         else:
             _log("id_ref_processed", {"embedding": False})
+    else:
+        _log("id_ref_received", {"bytes": 0})
     generator: Optional[torch.Generator] = None
     if seed is not None:
         generator = torch.Generator(device=_state.holder.device).manual_seed(int(seed))
@@ -238,18 +249,13 @@ def generate(
             _ensure_lcm_loaded()
             _log("lcm_enabled", {"scheduler": True})
         ip_kwargs: Dict[str, Any] = {}
-        if id_embedding is not None and _state.ip_adapter_loaded:
-            emb_t = torch.tensor(id_embedding, dtype=torch.float32, device=_state.holder.device).unsqueeze(0).unsqueeze(0)
-            neg = torch.zeros_like(emb_t)
-            faceid_embeds = torch.cat([neg, emb_t], dim=0)
-            if int(batch) > 1:
-                faceid_embeds = faceid_embeds.repeat(1, int(batch), 1)
+        if id_embedding is not None and _state.ip_adapter_loaded and face_image_for_adapter is not None:
+
             ip_kwargs = {
-                "ip_adapter_image": None,
-                "ip_adapter_image_embeds": [faceid_embeds],
-                "ip_adapter_scale": [float(id_scale)],
+                "ip_adapter_image": face_image_for_adapter,
+                "ip_adapter_scale": float(id_scale),
             }
-            _log("ip_adapter_applied", {"scale": id_scale, "emb_shape": list(faceid_embeds.shape)})
+            _log("ip_adapter_applied", {"scale": id_scale, "has_face_image": True, "arcface_available": True})
         effective_steps = int(steps if not use_lcm else DEFAULT_LCM_STEPS)
         effective_guidance = float(guidance_scale if not use_lcm else DEFAULT_LCM_GUIDANCE)
         result_images = _state.holder.pipeline(

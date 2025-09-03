@@ -10,3 +10,30 @@ curl http://localhost:8000/health
 cd C:\Users\black\IdeaProjects\worker\ai-worker
 
 docker logs -f aiw
+
+docker build -t ai-worker:dev .
+docker rm -f aiw
+docker run --rm -d --name aiw --gpus all -p 8000:8000 -v "$PWD/cache:/root/.cache/huggingface" -v "$PWD/data:/app/data" ai-worker:dev
+
+curl.exe -X POST "http://localhost:8000/generate" -F "id_ref=@C:\Users\black\IdeaProjects\worker\ai-worker\data\input\face.jpg" -F "id_scale=1.1" -F "prompt=male, photo portrait, studio light, realistic skin" -F "use_lcm=false" -F "steps=30" -F "guidance_scale=6.8" -F "batch=1" -F "seed=12345" --output out.png
+
+
+=============================
+
+docker rm -f aiw
+
+cd C:\Users\black\IdeaProjects\worker\ai-worker
+
+docker build -t ai-worker:dev .
+
+docker run --rm -d --name aiw --gpus all -p 8000:8000 `
+  -v "$PWD/cache:/root/.cache/huggingface" `
+  -v "$PWD/cache_insightface:/root/.insightface" `
+  -v "$PWD/data:/app/data" `
+  -v "$PWD/models:/app/models" `
+  ai-worker:dev
+
+curl http://localhost:8000/health
+
+curl.exe -X POST "http://localhost:8000/generate" -F "id_ref=@data/input/face.jpg" -F "id_scale=1.1" -F "prompt=male, photo portrait, studio light, realistic skin" -F "use_lcm=false" -F "steps=30" -F "guidance_scale=6.8" -F "batch=1" -F "seed=12345" --output out.png
+
